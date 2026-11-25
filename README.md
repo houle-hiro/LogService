@@ -38,8 +38,8 @@ export AUTH_TOKEN=$(openssl rand -hex 24)
 ```yaml
 server:
   port: 8080
-  read_timeout: 60
-  write_timeout: 300
+  read_timeout: 3600
+  write_timeout: 3600
   idle_timeout: 120
 
 storage:

@@ -131,8 +131,8 @@ func TestSetDefaults(t *testing.T) {
 	if cfg.Server.Port != 8080 {
 		t.Errorf("默认端口期望 8080，实际 %d", cfg.Server.Port)
 	}
-	if cfg.Server.ReadTimeout != 30 {
-		t.Errorf("默认读取超时期望 30，实际 %d", cfg.Server.ReadTimeout)
+	if cfg.Server.ReadTimeout != 3600 {
+		t.Errorf("默认读取超时期望 3600，实际 %d", cfg.Server.ReadTimeout)
 	}
 	if cfg.Storage.Path != "./data" {
 		t.Errorf("默认存储路径期望 ./data，实际 %s", cfg.Storage.Path)

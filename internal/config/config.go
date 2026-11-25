@@ -102,10 +102,10 @@ func (c *Config) setDefaults() {
 		c.Server.Port = 8080
 	}
 	if c.Server.ReadTimeout == 0 {
-		c.Server.ReadTimeout = 30
+		c.Server.ReadTimeout = 3600
 	}
 	if c.Server.WriteTimeout == 0 {
-		c.Server.WriteTimeout = 30
+		c.Server.WriteTimeout = 3600
 	}
 	if c.Server.IdleTimeout == 0 {
 		c.Server.IdleTimeout = 120

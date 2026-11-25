@@ -124,7 +124,12 @@ run_daemon() {
     fi
     
     ensure_log_dir
-    
+
+    # 保留上一轮日志，避免重启覆盖
+    if [ -f "$LOG_DIR/log-service.log" ]; then
+        mv -f "$LOG_DIR/log-service.log" "$LOG_DIR/log-service.log.prev"
+    fi
+
     log_info "启动服务（后台模式）..."
     
     # 后台启动，输出重定向到日志文件
