@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateFilename(t *testing.T) {
 	tests := []struct {
@@ -8,119 +11,87 @@ func TestValidateFilename(t *testing.T) {
 		filename string
 		wantErr  bool
 	}{
-		{
-			name:     "有效文件名",
-			filename: "myapp_abc123_20240101120000.zip",
-			wantErr:  false,
-		},
-		{
-			name:     "另一个有效文件名",
-			filename: "service_xyz789_20231231235959.zip",
-			wantErr:  false,
-		},
-		{
-			name:     "空文件名",
-			filename: "",
-			wantErr:  true,
-		},
-		{
-			name:     "缺少扩展名",
-			filename: "myapp_abc123_20240101120000",
-			wantErr:  true,
-		},
-		{
-			name:     "错误的扩展名",
-			filename: "myapp_abc123_20240101120000.tar",
-			wantErr:  true,
-		},
-		{
-			name:     "缺少时间戳",
-			filename: "myapp_abc123.zip",
-			wantErr:  true,
-		},
-		{
-			name:     "时间戳位数不足",
-			filename: "myapp_abc123_2024010112000.zip",
-			wantErr:  true,
-		},
-		{
-			name:     "时间戳位数过多",
-			filename: "myapp_abc123_202401011200000.zip",
-			wantErr:  true,
-		},
-		{
-			name:     "缺少下划线分隔",
-			filename: "myapp-abc123-20240101120000.zip",
-			wantErr:  true,
-		},
-		{
-			name:     "包含非法字符",
-			filename: "my app_abc123_20240101120000.zip",
-			wantErr:  true,
-		},
-		{
-			name:     "只有两部分",
-			filename: "myapp_20240101120000.zip",
-			wantErr:  true,
-		},
-		{
-			name:     "空名称",
-			filename: "_abc123_20240101120000.zip",
-			wantErr:  true,
-		},
-		{
-			name:     "空 commit_id",
-			filename: "myapp__20240101120000.zip",
-			wantErr:  true,
-		},
+		{"zip", "release.zip", false},
+		{"多段扩展名", "app-v1.0.tar.gz", false},
+		{"日志文件", "build_20240101.log", false},
+		{"图片", "screenshot.png", false},
+		{"无扩展名", "Makefile", false},
+		{"中文名", "设计文档.pdf", false},
+		{"空格与括号", "my report (1).docx", false},
+		{"带 commit 与时间的旧名", "myapp_abc123_20240101120000.zip", false},
+		{"空文件名", "", true},
+		{"点", ".", true},
+		{"双点", "..", true},
+		{"含斜杠", "a/b.txt", true},
+		{"含反斜杠", `a\b.txt`, true},
+		{"含换行", "a\nb.txt", true},
+		{"含 NUL", "a\x00b.txt", true},
+		{"超长", strings.Repeat("a", 256), true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := ValidateFilename(tt.filename)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ValidateFilename(%q) error = %v, wantErr %v",
-					tt.filename, err, tt.wantErr)
+				t.Errorf("ValidateFilename(%q) error = %v, wantErr %v", tt.filename, err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestBuildPrefix(t *testing.T) {
+func TestNormalizeUsername(t *testing.T) {
 	tests := []struct {
-		name   string
-		commit string
-		want   string
+		name    string
+		input   string
+		want    string
+		wantErr bool
 	}{
-		{
-			name:   "myapp",
-			commit: "abc123",
-			want:   "myapp_abc123_",
-		},
-		{
-			name:   "myapp",
-			commit: "",
-			want:   "myapp_",
-		},
-		{
-			name:   "",
-			commit: "abc123",
-			want:   "_abc123_",
-		},
-		{
-			name:   "",
-			commit: "",
-			want:   "",
-		},
+		{"普通", "alice", "alice", false},
+		{"大写转小写", "Alice", "alice", false},
+		{"邮箱", "alice@example.com", "alice@example.com", false},
+		{"带点与下划线", "a.b_c-1", "a.b_c-1", false},
+		{"前后空格", "  bob  ", "bob", false},
+		{"空", "", "", true},
+		{"含斜杠", "a/b", "", true},
+		{"路径穿越", "../root", "", true},
+		{"以点开头", ".hidden", "", true},
+		{"以连字符开头", "-abc", "", true},
+		{"含空格", "a b", "", true},
+		{"超长", strings.Repeat("a", 65), "", true},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name+"_"+tt.commit, func(t *testing.T) {
-			got := BuildPrefix(tt.name, tt.commit)
-			if got != tt.want {
-				t.Errorf("BuildPrefix(%q, %q) = %q, want %q",
-					tt.name, tt.commit, got, tt.want)
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeUsername(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("NormalizeUsername(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("NormalizeUsername(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSafeJoin(t *testing.T) {
+	base := t.TempDir()
+
+	if _, err := SafeJoin(base, "alice", "a.txt"); err != nil {
+		t.Errorf("正常路径不应报错: %v", err)
+	}
+	if _, err := SafeJoin(base, "..", "etc", "passwd"); err == nil {
+		t.Error("越界路径应报错")
+	}
+	if _, err := SafeJoin(base, "alice", "..", "..", "x"); err == nil {
+		t.Error("多级越界应报错")
+	}
+}
+
+func TestIsTempFile(t *testing.T) {
+	if !IsTempFile(".upload-123") {
+		t.Error("临时文件应被识别")
+	}
+	if IsTempFile("normal.txt") {
+		t.Error("普通文件不应被识别为临时文件")
 	}
 }

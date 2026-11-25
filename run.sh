@@ -215,11 +215,23 @@ clean_project() {
     log_info "清理完成"
 }
 
+# 加载本地环境变量（AUTH_TOKEN 等密钥，不进仓库）
+load_env() {
+    local env_file="configs/.env"
+    if [ -f "$env_file" ]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "$env_file"
+        set +a
+    fi
+}
+
 # 主函数
 main() {
     local script_dir=$(cd "$(dirname "$0")" && pwd)
     cd "$script_dir"
-    
+
+    load_env
     check_go_env
     
     local mode="all"

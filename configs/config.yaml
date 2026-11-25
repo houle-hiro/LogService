@@ -1,28 +1,38 @@
-# 日志服务配置文件
-# 采用 YAML 格式，支持结构化配置
+# 文件中转服务配置
+# token 建议通过环境变量 AUTH_TOKEN 或 configs/.env 注入，不要提交到仓库
 
 server:
   # 服务监听端口
   port: 8080
   # 读取超时时间（秒）
-  read_timeout: 30
+  read_timeout: 60
   # 写入超时时间（秒）
-  write_timeout: 30
+  write_timeout: 300
   # 空闲超时时间（秒）
   idle_timeout: 120
 
 storage:
-  # 日志文件存储路径
+  # 文件存储根目录，实际结构为 {path}/{username}/{filename}
   path: "./data"
-  # 日志文件最大保留时间（秒），默认 30 天
+  # 文件保留时间（秒），0 表示不自动清理，默认 30 天
   max_age_seconds: 2592000
 
 upload:
-  # 最大上传文件大小（MB）
-  max_size_mb: 100
+  # 单个文件最大大小（MB）
+  max_size_mb: 1024
 
 ratelimit:
-  # 限流：每时间窗口允许的最大请求数
-  limit: 100
+  # 限流：每个 IP 在时间窗口内允许的最大请求数
+  limit: 300
   # 限流时间窗口（秒）
   interval_seconds: 60
+
+auth:
+  # 是否启用口令鉴权
+  enabled: true
+  # 访问口令，留空则必须用 AUTH_TOKEN 环境变量提供
+  token: ""
+  # 会话签名密钥，留空则由 token 派生
+  session_secret: ""
+  # 网页登录有效期（小时）
+  session_ttl_hours: 12

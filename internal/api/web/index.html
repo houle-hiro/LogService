@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>文件中转</title>
+<style>
+  :root{--bg:#f4f6f8;--card:#fff;--text:#1f2328;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--danger:#dc2626}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 20px;background:var(--card);border-bottom:1px solid var(--line)}
+  .brand{font-size:16px;font-weight:600}
+  .right{display:flex;align-items:center;gap:12px;font-size:13px;color:var(--muted)}
+  .right b{color:var(--text);font-weight:600}
+  main{max-width:960px;margin:24px auto;padding:0 16px 40px}
+  .drop{border:2px dashed #cbd5e1;background:var(--card);border-radius:12px;padding:30px 16px;text-align:center;transition:.15s}
+  .drop.over{border-color:var(--accent);background:#eff6ff}
+  .drop-title{margin:0 0 6px;font-size:15px;font-weight:600}
+  .drop-sub{margin:0;font-size:13px;color:var(--muted)}
+  .progress{height:6px;margin-top:12px;background:#e5e7eb;border-radius:99px;overflow:hidden}
+  .bar{height:100%;width:0;background:var(--accent);transition:width .2s}
+  .status{margin:12px 2px;font-size:13px;color:var(--muted);min-height:18px}
+  .status.err{color:var(--danger)}
+  .toolbar{display:flex;gap:10px;margin:20px 0 10px}
+  .toolbar input{flex:1;padding:9px 12px;font-size:14px;border:1px solid var(--line);border-radius:8px;outline:none;background:var(--card);color:var(--text)}
+  .toolbar input:focus{border-color:var(--accent)}
+  .ghost{padding:8px 14px;font-size:13px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text);cursor:pointer}
+  .ghost:hover{background:#f8fafc}
+  .link{border:0;background:none;color:var(--accent);font-size:13px;cursor:pointer;padding:2px 4px}
+  .link:hover{text-decoration:underline}
+  .link.danger{color:var(--danger)}
+  .table-wrap{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--line)}
+  th{font-size:12px;color:var(--muted);font-weight:500;background:#fafbfc}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:#f8fafc}
+  td.name{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  td.num,th.num{width:110px;white-space:nowrap;color:var(--muted)}
+  td.time,th.time{width:170px;white-space:nowrap;color:var(--muted)}
+  td.ops,th.ops{width:120px;text-align:right;white-space:nowrap}
+  .empty{margin:0;padding:26px;text-align:center;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">文件中转</div>
+  <div class="right">
+    <span>当前用户 <b>{{.Username}}</b></span>
+    <form method="post" action="/logout"><button class="ghost" type="submit">退出</button></form>
+  </div>
+</header>
+<main>
+  <section class="drop" id="drop">
+    <p class="drop-title">把文件拖到这里</p>
+    <p class="drop-sub">或 <button class="link" id="pick" type="button">选择文件</button>，单个文件不超过 {{.MaxSizeMB}} MB，同名文件将被覆盖</p>
+    <input type="file" id="file" multiple hidden>
+  </section>
+  <div class="progress" id="progress" hidden><div class="bar" id="bar"></div></div>
+  <p class="status" id="status"></p>
+
+  <section class="toolbar">
+    <input id="search" type="search" placeholder="按文件名过滤">
+    <button class="ghost" id="refresh" type="button">刷新</button>
+  </section>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>文件名</th><th class="num">大小</th><th class="time">修改时间</th><th class="ops"></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="empty" id="empty" hidden>暂无文件</p>
+  </div>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  var drop = document.getElementById('drop');
+  var fileInput = document.getElementById('file');
+  var pick = document.getElementById('pick');
+  var rows = document.getElementById('rows');
+  var empty = document.getElementById('empty');
+  var statusEl = document.getElementById('status');
+  var search = document.getElementById('search');
+  var progress = document.getElementById('progress');
+  var bar = document.getElementById('bar');
+  var refresh = document.getElementById('refresh');
+  var keyword = '';
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text || '';
+    statusEl.className = 'status' + (isError ? ' err' : '');
+  }
+
+  function request(url, options) {
+    var opts = options || {};
+    opts.credentials = 'same-origin';
+    return fetch(url, opts).then(function (resp) {
+      if (resp.status === 401) {
+        location.href = '/login?next=' + encodeURIComponent(location.pathname);
+        throw new Error('未登录');
+      }
+      return resp;
+    });
+  }
+
+  function fmtSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+  }
+
+  function fmtTime(s) {
+    var d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    function p(n) { return n < 10 ? '0' + n : '' + n; }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+      p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  function button(label, cls, handler) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'link' + (cls ? ' ' + cls : '');
+    b.textContent = label;
+    b.addEventListener('click', handler);
+    return b;
+  }
+
+  function render(files) {
+    rows.textContent = '';
+    empty.hidden = files.length > 0;
+    files.forEach(function (f) {
+      var tr = document.createElement('tr');
+
+      var nameTd = document.createElement('td');
+      nameTd.className = 'name';
+      nameTd.textContent = f.name;
+      nameTd.title = f.name;
+
+      var sizeTd = document.createElement('td');
+      sizeTd.className = 'num';
+      sizeTd.textContent = fmtSize(f.size);
+
+      var timeTd = document.createElement('td');
+      timeTd.className = 'time';
+      timeTd.textContent = fmtTime(f.modified_time);
+
+      var opsTd = document.createElement('td');
+      opsTd.className = 'ops';
+      opsTd.appendChild(button('下载', '', function () { download(f.name); }));
+      opsTd.appendChild(button('删除', 'danger', function () { remove(f.name); }));
+
+      tr.appendChild(nameTd);
+      tr.appendChild(sizeTd);
+      tr.appendChild(timeTd);
+      tr.appendChild(opsTd);
+      rows.appendChild(tr);
+    });
+  }
+
+  function load() {
+    var url = '/query' + (keyword ? '?keyword=' + encodeURIComponent(keyword) : '');
+    request(url).then(function (resp) {
+      return resp.json();
+    }).then(function (json) {
+      var data = json.data || {};
+      render(data.files || []);
+    }).catch(function (err) {
+      setStatus(err.message, true);
+    });
+  }
+
+  function fallbackDownload(url, name) {
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  function download(name) {
+    var url = '/download?filename=' + encodeURIComponent(name);
+    // 支持文件系统访问 API 时让用户自选保存位置；HTTP 页面下浏览器不提供该 API，回退默认下载
+    if (window.showSaveFilePicker && window.isSecureContext) {
+      window.showSaveFilePicker({ suggestedName: name }).then(function (handle) {
+        return handle.createWritable().then(function (writable) {
+          return request(url).then(function (resp) {
+            if (!resp.ok) throw new Error('下载失败 HTTP ' + resp.status);
+            return resp.body.pipeTo(writable);
+          });
+        });
+      }).catch(function (err) {
+        if (err && err.name === 'AbortError') return;
+        fallbackDownload(url, name);
+      });
+      return;
+    }
+    fallbackDownload(url, name);
+  }
+
+  function remove(name) {
+    if (!window.confirm('确定删除 ' + name + '？')) return;
+    request('/file?filename=' + encodeURIComponent(name), { method: 'DELETE' }).then(function (resp) {
+      if (!resp.ok) throw new Error('删除失败 HTTP ' + resp.status);
+      setStatus('已删除 ' + name);
+      load();
+    }).catch(function (err) {
+      setStatus(err.message, true);
+    });
+  }
+
+  function uploadOne(file) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/upload');
+      xhr.withCredentials = true;
+      xhr.upload.onprogress = function (e) {
+        if (e.lengthComputable) bar.style.width = Math.round(e.loaded / e.total * 100) + '%';
+      };
+      xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(xhr.responseText);
+          return;
+        }
+        var msg = 'HTTP ' + xhr.status;
+        try {
+          var parsed = JSON.parse(xhr.responseText);
+          if (parsed && parsed.message) msg = parsed.message;
+        } catch (ignored) {}
+        reject(new Error(msg));
+      };
+      xhr.onerror = function () { reject(new Error('网络错误')); };
+      var fd = new FormData();
+      fd.append('file', file, file.name);
+      bar.style.width = '0%';
+      xhr.send(fd);
+    });
+  }
+
+  function uploadAll(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) return;
+    var index = 0;
+    progress.hidden = false;
+
+    function next() {
+      if (index >= files.length) {
+        progress.hidden = true;
+        setStatus('上传完成，共 ' + files.length + ' 个文件');
+        load();
+        return;
+      }
+      var file = files[index];
+      index += 1;
+      setStatus('正在上传 ' + file.name + '（' + index + '/' + files.length + '）');
+      uploadOne(file).then(next).catch(function (err) {
+        progress.hidden = true;
+        bar.style.width = '0%';
+        setStatus('上传失败 ' + file.name + '：' + err.message, true);
+      });
+    }
+    next();
+  }
+
+  pick.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function () {
+    uploadAll(fileInput.files);
+    fileInput.value = '';
+  });
+
+  ['dragenter', 'dragover'].forEach(function (evt) {
+    drop.addEventListener(evt, function (e) {
+      e.preventDefault();
+      drop.classList.add('over');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (evt) {
+    drop.addEventListener(evt, function (e) {
+      e.preventDefault();
+      drop.classList.remove('over');
+    });
+  });
+  drop.addEventListener('drop', function (e) {
+    uploadAll(e.dataTransfer.files);
+  });
+
+  var timer = null;
+  search.addEventListener('input', function () {
+    keyword = search.value.trim();
+    clearTimeout(timer);
+    timer = setTimeout(load, 200);
+  });
+  refresh.addEventListener('click', load);
+
+  load();
+})();
+</script>
+</body>
+</html>

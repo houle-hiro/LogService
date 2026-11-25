@@ -1,111 +1,66 @@
 package service
 
 import (
-	"io"
-	"log-service/internal/model"
 	"testing"
 	"time"
 )
 
-func TestCleanupClean(t *testing.T) {
-	storage := newMockStorage()
-
-	// 添加一个过期文件
-	storage.files["old_file.zip"] = []byte("old content")
-
-	// 添加一个新文件
-	storage.files["new_file.zip"] = []byte("new content")
-
-	// 创建清理器，设置过期时间为负数（这样所有文件都会过期）
-	cleanup := &Cleanup{
+func newTestCleanup(storage Storage, maxAge time.Duration) *Cleanup {
+	return &Cleanup{
 		storage:  storage,
-		maxAge:   -1 * time.Hour, // 负数表示所有文件都过期
-		interval: 1 * time.Hour,
+		maxAge:   maxAge,
+		interval: time.Hour,
 		stopChan: make(chan struct{}),
-	}
-
-	// 执行清理
-	cleanup.clean()
-
-	// 验证文件已被删除
-	if len(storage.files) != 0 {
-		t.Errorf("期望所有文件被删除，剩余 %d", len(storage.files))
 	}
 }
 
-func TestCleanupCleanNotExpired(t *testing.T) {
+func TestCleanupRemovesExpired(t *testing.T) {
 	storage := newMockStorage()
+	storage.put("alice", "old.txt", []byte("old"), time.Now().Add(-2*time.Hour))
+	storage.put("alice", "new.txt", []byte("new"), time.Now())
+	storage.put("bob", "bob-old.log", []byte("old"), time.Now().Add(-3*time.Hour))
 
-	// 添加文件
-	storage.files["file1.zip"] = []byte("content")
+	newTestCleanup(storage, time.Hour).CleanOnce()
 
-	// 创建清理器，设置很长的过期时间
-	cleanup := &Cleanup{
-		storage:  storage,
-		maxAge:   24 * time.Hour,
-		interval: 1 * time.Hour,
-		stopChan: make(chan struct{}),
+	aliceFiles, _ := storage.Query("alice", "")
+	if len(aliceFiles) != 1 || aliceFiles[0].Name != "new.txt" {
+		t.Errorf("alice 应只剩 new.txt，实际 %+v", aliceFiles)
 	}
+	bobFiles, _ := storage.Query("bob", "")
+	if len(bobFiles) != 0 {
+		t.Errorf("bob 的过期文件应被删除，实际 %+v", bobFiles)
+	}
+}
 
-	// 执行清理
-	cleanup.clean()
+func TestCleanupKeepsFresh(t *testing.T) {
+	storage := newMockStorage()
+	storage.put("alice", "fresh.txt", []byte("x"), time.Now())
 
-	// 验证文件未被删除
-	if len(storage.files) != 1 {
-		t.Error("未过期文件不应被删除")
+	newTestCleanup(storage, 24*time.Hour).CleanOnce()
+
+	files, _ := storage.Query("alice", "")
+	if len(files) != 1 {
+		t.Errorf("未过期文件应保留，实际 %d", len(files))
+	}
+}
+
+func TestCleanupDisabledWhenZero(t *testing.T) {
+	storage := newMockStorage()
+	storage.put("alice", "ancient.txt", []byte("x"), time.Now().Add(-100*24*time.Hour))
+
+	newTestCleanup(storage, 0).CleanOnce()
+
+	files, _ := storage.Query("alice", "")
+	if len(files) != 1 {
+		t.Errorf("maxAge 为 0 时不应清理，实际 %d", len(files))
 	}
 }
 
 func TestCleanupStartStop(t *testing.T) {
 	storage := newMockStorage()
-	cleanup := NewCleanup(storage, 3600) // 1 小时
-
-	// 启动清理
+	cleanup := NewCleanup(storage, 3600)
 	cleanup.Start()
-
-	// 给 goroutine 一点启动时间
-	time.Sleep(10 * time.Millisecond)
-
-	// 停止清理
 	cleanup.Stop()
-
-	// 再次停止应该不会 panic
+	// 重复 Stop 不应 panic
 	cleanup.Stop()
-}
-
-func TestCleanupListAllError(t *testing.T) {
-	// 使用一个会返回错误的存储
-	errorStorage := &errorMockStorage{}
-	cleanup := &Cleanup{
-		storage:  errorStorage,
-		maxAge:   24 * time.Hour,
-		interval: 1 * time.Hour,
-		stopChan: make(chan struct{}),
-	}
-
-	// 执行清理，不应 panic
-	cleanup.clean()
-}
-
-// errorMockStorage 是一个总是返回错误的存储实现
-type errorMockStorage struct{}
-
-func (m *errorMockStorage) Save(filename string, reader io.Reader) error {
-	return io.EOF
-}
-
-func (m *errorMockStorage) Get(filename string) (io.ReadCloser, int64, error) {
-	return nil, 0, io.EOF
-}
-
-func (m *errorMockStorage) Query(prefix string) ([]model.FileInfo, error) {
-	return nil, io.EOF
-}
-
-func (m *errorMockStorage) Delete(filename string) error {
-	return io.EOF
-}
-
-func (m *errorMockStorage) ListAll() ([]model.FileInfo, error) {
-	return nil, io.EOF
 }

@@ -5,203 +5,244 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
 func TestNewLocalStorage(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	storage, err := NewLocalStorage(tmpDir)
+	storage, err := NewLocalStorage(filepath.Join(tmpDir, "data"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
-
-	if storage == nil {
-		t.Fatal("存储实例不应为 nil")
+	if storage.basePath != filepath.Join(tmpDir, "data") {
+		t.Errorf("存储路径不符: %s", storage.basePath)
 	}
-
-	if storage.basePath != tmpDir {
-		t.Errorf("存储路径期望 %s，实际 %s", tmpDir, storage.basePath)
-	}
-
-	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
+	if _, err := os.Stat(storage.basePath); os.IsNotExist(err) {
 		t.Error("存储目录应已创建")
 	}
 }
 
-func TestLocalStorageSaveAndGet(t *testing.T) {
-	tmpDir := t.TempDir()
-	storage, _ := NewLocalStorage(tmpDir)
+func TestSaveAndGet(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
 
-	content := []byte("test content")
-	filename := "test_abc123_20240101120000.zip"
-
-	err := storage.Save(filename, bytes.NewReader(content))
+	content := []byte("hello world")
+	overwritten, size, err := storage.Save("alice", "notes.txt", bytes.NewReader(content))
 	if err != nil {
-		t.Fatalf("保存文件失败: %v", err)
+		t.Fatalf("保存失败: %v", err)
+	}
+	if overwritten {
+		t.Error("首次保存不应标记为覆盖")
+	}
+	if size != int64(len(content)) {
+		t.Errorf("大小期望 %d，实际 %d", len(content), size)
 	}
 
-	// 验证子目录已创建
-	subDir := filepath.Join(tmpDir, "test")
-	if _, err := os.Stat(subDir); os.IsNotExist(err) {
-		t.Error("子目录 test 应已创建")
+	// 验证目录结构 data/alice/notes.txt
+	if _, err := os.Stat(filepath.Join(storage.basePath, "alice", "notes.txt")); err != nil {
+		t.Errorf("文件应保存在用户目录下: %v", err)
 	}
 
-	// 验证文件在子目录中
-	filePath := filepath.Join(subDir, filename)
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		t.Error("文件应已保存到子目录")
-	}
-
-	reader, size, err := storage.Get(filename)
+	reader, gotSize, err := storage.Get("alice", "notes.txt")
 	if err != nil {
-		t.Fatalf("读取文件失败: %v", err)
+		t.Fatalf("读取失败: %v", err)
 	}
 	defer reader.Close()
-
-	if size != int64(len(content)) {
-		t.Errorf("文件大小期望 %d，实际 %d", len(content), size)
+	if gotSize != int64(len(content)) {
+		t.Errorf("读取大小期望 %d，实际 %d", len(content), gotSize)
 	}
-
-	readContent, _ := io.ReadAll(reader)
-	if !bytes.Equal(readContent, content) {
-		t.Error("读取内容与写入内容不一致")
+	got, _ := io.ReadAll(reader)
+	if !bytes.Equal(got, content) {
+		t.Error("内容不一致")
 	}
 }
 
-func TestLocalStorageGetNotFound(t *testing.T) {
-	tmpDir := t.TempDir()
-	storage, _ := NewLocalStorage(tmpDir)
+func TestSaveOverwrite(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
 
-	_, _, err := storage.Get("nonexistent_nonexist_20240101120000.zip")
-	if err == nil {
-		t.Error("读取不存在的文件应返回错误")
+	storage.Save("alice", "a.txt", bytes.NewReader([]byte("v1")))
+	overwritten, size, err := storage.Save("alice", "a.txt", bytes.NewReader([]byte("v2-long")))
+	if err != nil {
+		t.Fatalf("覆盖保存失败: %v", err)
+	}
+	if !overwritten {
+		t.Error("应标记为覆盖")
+	}
+	if size != int64(len("v2-long")) {
+		t.Errorf("大小期望 %d，实际 %d", len("v2-long"), size)
+	}
+
+	reader, _, _ := storage.Get("alice", "a.txt")
+	defer reader.Close()
+	got, _ := io.ReadAll(reader)
+	if string(got) != "v2-long" {
+		t.Errorf("内容应为 v2-long，实际 %s", got)
 	}
 }
 
-func TestLocalStorageQuery(t *testing.T) {
-	tmpDir := t.TempDir()
-	storage, _ := NewLocalStorage(tmpDir)
+func TestGetNotFound(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
 
-	files := []string{
-		"app1_abc111_20240101120000.zip",
-		"app1_abc222_20240101130000.zip",
-		"app2_abc111_20240101140000.zip",
-		"app1_def333_20240101150000.zip",
+	if _, _, err := storage.Get("alice", "missing.txt"); err != ErrNotFound {
+		t.Errorf("应返回 ErrNotFound，实际 %v", err)
 	}
+	if _, _, err := storage.Get("nobody", "missing.txt"); err != ErrNotFound {
+		t.Errorf("不存在的用户应返回 ErrNotFound，实际 %v", err)
+	}
+}
 
-	for _, f := range files {
-		err := storage.Save(f, bytes.NewReader([]byte("content")))
-		if err != nil {
-			t.Fatalf("保存文件 %s 失败: %v", f, err)
+func TestGetRejectsTraversal(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
+
+	if _, _, err := storage.Get("alice", "../etc/passwd"); err == nil {
+		t.Error("路径穿越应报错")
+	}
+	if _, _, err := storage.Get("../alice", "a.txt"); err == nil {
+		t.Error("非法用户名应报错")
+	}
+}
+
+func TestQueryIsolation(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
+
+	storage.Save("alice", "a1.log", bytes.NewReader([]byte("1")))
+	storage.Save("alice", "a2.zip", bytes.NewReader([]byte("2")))
+	storage.Save("bob", "b1.png", bytes.NewReader([]byte("3")))
+
+	aliceFiles, err := storage.Query("alice", "")
+	if err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	if len(aliceFiles) != 2 {
+		t.Fatalf("alice 期望 2 个文件，实际 %d", len(aliceFiles))
+	}
+	for _, f := range aliceFiles {
+		if f.Username != "alice" {
+			t.Errorf("不应出现其他用户的文件: %+v", f)
 		}
 	}
 
-	// 验证子目录结构
-	for _, name := range []string{"app1", "app2"} {
-		subDir := filepath.Join(tmpDir, name)
-		if _, err := os.Stat(subDir); os.IsNotExist(err) {
-			t.Errorf("子目录 %s 应已创建", name)
-		}
+	bobFiles, _ := storage.Query("bob", "")
+	if len(bobFiles) != 1 || bobFiles[0].Name != "b1.png" {
+		t.Errorf("bob 查询结果不符: %+v", bobFiles)
 	}
 
-	// 测试按名称查询
-	results, err := storage.Query("app1_")
+	missing, err := storage.Query("carol", "")
 	if err != nil {
-		t.Fatalf("查询失败: %v", err)
+		t.Fatalf("不存在的用户不应报错: %v", err)
 	}
-	if len(results) != 3 {
-		t.Errorf("期望返回 3 个文件，实际 %d", len(results))
-	}
-
-	// 测试按名称和 commit 查询
-	results, err = storage.Query("app1_abc")
-	if err != nil {
-		t.Fatalf("查询失败: %v", err)
-	}
-	if len(results) != 2 {
-		t.Errorf("期望返回 2 个文件，实际 %d", len(results))
-	}
-
-	// 测试空前缀（返回所有）
-	results, err = storage.Query("")
-	if err != nil {
-		t.Fatalf("查询失败: %v", err)
-	}
-	if len(results) != 4 {
-		t.Errorf("期望返回 4 个文件，实际 %d", len(results))
-	}
-
-	// 测试无匹配
-	results, err = storage.Query("nonexistent_")
-	if err != nil {
-		t.Fatalf("查询失败: %v", err)
-	}
-	if len(results) != 0 {
-		t.Errorf("期望返回 0 个文件，实际 %d", len(results))
+	if len(missing) != 0 {
+		t.Errorf("不存在的用户应返回空列表，实际 %d", len(missing))
 	}
 }
 
-func TestLocalStorageDelete(t *testing.T) {
-	tmpDir := t.TempDir()
-	storage, _ := NewLocalStorage(tmpDir)
+func TestQueryKeyword(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
 
-	filename := "test_abc123_20240101120000.zip"
-	content := []byte("content")
+	storage.Save("alice", "Build-Log.TXT", bytes.NewReader([]byte("1")))
+	storage.Save("alice", "screenshot.png", bytes.NewReader([]byte("2")))
 
-	storage.Save(filename, bytes.NewReader(content))
+	files, _ := storage.Query("alice", "build")
+	if len(files) != 1 || files[0].Name != "Build-Log.TXT" {
+		t.Errorf("关键字过滤应不区分大小写，实际 %+v", files)
+	}
 
-	err := storage.Delete(filename)
-	if err != nil {
+	files, _ = storage.Query("alice", ".png")
+	if len(files) != 1 {
+		t.Errorf("期望 1 个 png，实际 %d", len(files))
+	}
+
+	files, _ = storage.Query("alice", "nothing")
+	if len(files) != 0 {
+		t.Errorf("无匹配应返回空，实际 %d", len(files))
+	}
+}
+
+func TestDelete(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
+
+	storage.Save("alice", "a.txt", bytes.NewReader([]byte("1")))
+	if err := storage.Delete("alice", "a.txt"); err != nil {
 		t.Fatalf("删除失败: %v", err)
 	}
-
-	// 验证已删除
-	filePath := filepath.Join(tmpDir, "test", filename)
-	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
-		t.Error("文件应已被删除")
+	if _, _, err := storage.Get("alice", "a.txt"); err != ErrNotFound {
+		t.Errorf("删除后应不存在，实际 %v", err)
+	}
+	if err := storage.Delete("alice", "a.txt"); err != ErrNotFound {
+		t.Errorf("重复删除应返回 ErrNotFound，实际 %v", err)
 	}
 }
 
-func TestLocalStorageListAll(t *testing.T) {
-	tmpDir := t.TempDir()
-	storage, _ := NewLocalStorage(tmpDir)
+func TestListAllAndUsers(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
 
-	storage.Save("myapp_log1_20240101120000.zip", bytes.NewReader([]byte("content1")))
-	storage.Save("myapp_log2_20240101120001.zip", bytes.NewReader([]byte("content2")))
-	storage.Save("other_log1_20240101120002.zip", bytes.NewReader([]byte("content3")))
+	storage.Save("alice", "a.txt", bytes.NewReader([]byte("1")))
+	storage.Save("bob", "b.txt", bytes.NewReader([]byte("2")))
 
-	files, err := storage.ListAll()
+	all, err := storage.ListAll()
 	if err != nil {
-		t.Fatalf("列出文件失败: %v", err)
+		t.Fatalf("ListAll 失败: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("期望 2 个文件，实际 %d", len(all))
 	}
 
-	if len(files) != 3 {
-		t.Errorf("期望返回 3 个文件，实际 %d", len(files))
+	users, _ := storage.ListUsers()
+	if len(users) != 2 {
+		t.Errorf("期望 2 个用户目录，实际 %d", len(users))
 	}
 }
 
-func TestLocalStorageConcurrency(t *testing.T) {
-	tmpDir := t.TempDir()
-	storage, _ := NewLocalStorage(tmpDir)
+func TestTempFileHidden(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
+	storage.Save("alice", "a.txt", bytes.NewReader([]byte("1")))
 
-	done := make(chan bool, 10)
+	// 手动放一个临时文件，查询时不应出现
+	tmp := filepath.Join(storage.basePath, "alice", tempFilePrefix+"123")
+	os.WriteFile(tmp, []byte("partial"), 0644)
+
+	files, _ := storage.Query("alice", "")
+	if len(files) != 1 {
+		t.Errorf("临时文件不应出现在列表中，实际 %d", len(files))
+	}
+}
+
+func TestPruneEmptyUserDirs(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
+
+	storage.Save("alice", "a.txt", bytes.NewReader([]byte("1")))
+	os.MkdirAll(filepath.Join(storage.basePath, "emptyuser"), 0755)
+
+	removed := storage.PruneEmptyUserDirs()
+	if removed != 1 {
+		t.Errorf("期望清理 1 个空目录，实际 %d", removed)
+	}
+	if _, err := os.Stat(filepath.Join(storage.basePath, "emptyuser")); !os.IsNotExist(err) {
+		t.Error("空目录应已删除")
+	}
+	if _, err := os.Stat(filepath.Join(storage.basePath, "alice")); err != nil {
+		t.Error("非空目录不应被删除")
+	}
+}
+
+func TestConcurrentSave(t *testing.T) {
+	storage, _ := NewLocalStorage(t.TempDir())
+
+	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
+		wg.Add(1)
 		go func(idx int) {
-			filename := "concurrent" + string(rune('a'+idx)) + "_commit1_20240101120000.zip"
-			err := storage.Save(filename, bytes.NewReader([]byte("content")))
-			if err != nil {
+			defer wg.Done()
+			name := "file-" + string(rune('a'+idx)) + ".txt"
+			if _, _, err := storage.Save("alice", name, bytes.NewReader([]byte("content"))); err != nil {
 				t.Errorf("并发保存失败: %v", err)
 			}
-			done <- true
 		}(i)
 	}
+	wg.Wait()
 
-	for i := 0; i < 10; i++ {
-		<-done
-	}
-
-	files, _ := storage.ListAll()
+	files, _ := storage.Query("alice", "")
 	if len(files) != 10 {
 		t.Errorf("期望 10 个文件，实际 %d", len(files))
 	}

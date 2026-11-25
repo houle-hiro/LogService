@@ -1,127 +1,121 @@
-# Log Service
+# 文件中转服务
 
-日志文件管理服务，支持 zip 格式日志文件的上传、下载、查询和自动老化清理。
+按用户名隔离的文件上传、查询、下载服务。任意格式文件，带网页界面。
 
 ## 功能
 
-- **上传** - 上传 zip 日志文件，自动验证文件名格式
-- **下载** - 根据文件名下载日志文件
-- **查询** - 按名称和/或 commit_id 前缀查询文件列表
-- **老化清理** - 自动清理超时文件，可配置保留时长
-- **限流** - 内置请求限流保护
-
-## 文件命名规范
-
-```
-{名称}_{commit_id}_{datetime}.zip
-```
-
-- 名称和 commit_id 仅允许 `a-zA-Z0-9-`
-- datetime 为 14 位数字，格式 `YYYYMMDDhhmmss`
-- 示例: `myapp_abc123_20240101120000.zip`
+- **上传** - 任意扩展名，按用户名分目录存放，同名覆盖
+- **下载** - 流式下载，中文文件名不乱码，类型按扩展名推断
+- **查询** - 按用户名列出文件，支持文件名关键字过滤
+- **删除** - 删除单个文件
+- **网页** - 拖拽上传、文件列表、下载、删除，口令登录
+- **自动清理** - 按文件修改时间清理过期文件，可关闭
 
 ## 快速开始
 
-### 环境要求
-
-- Go 1.21+
-- Linux/macOS
-
-### 编译与运行
-
 ```bash
-# 编译
-./run.sh -b
+# 设置访问口令
+export AUTH_TOKEN=$(openssl rand -hex 24)
 
-# 前台运行（开发调试）
-./run.sh -r
-
-# 编译并前台运行（默认）
-./run.sh
-
-# 编译并后台运行（生产模式）
+# 编译并后台运行
 ./run.sh -d
 
-# 停止后台服务
-./run.sh -s
-
-# 查看运行日志
+# 查看日志
 ./run.sh -l
 
-# 清理编译产物和日志
-./run.sh -c
+# 停止
+./run.sh -s
 ```
+
+浏览器打开 `http://<host>:8080/`，输入用户名与口令即可使用。
+
+`run.sh` 会自动加载 `configs/.env`，可以把 `AUTH_TOKEN` 写在该文件里，避免进入仓库。
 
 ## 配置
 
-配置文件: `configs/config.yaml`
+配置文件 `configs/config.yaml`：
 
 ```yaml
 server:
-  port: 8080                # 监听端口
-  read_timeout: 30          # 读取超时(秒)
-  write_timeout: 30         # 写入超时(秒)
-  idle_timeout: 120         # 空闲超时(秒)
+  port: 8080
+  read_timeout: 60
+  write_timeout: 300
+  idle_timeout: 120
 
 storage:
-  path: "./data"            # 文件存储路径
-  max_age_seconds: 2592000  # 保留时长(秒)，默认30天
+  path: "./data"            # 实际结构 {path}/{username}/{filename}
+  max_age_seconds: 2592000  # 0 表示不清理
 
 upload:
-  max_size_mb: 100          # 最大上传大小(MB)
+  max_size_mb: 1024
 
 ratelimit:
-  limit: 100                # 时间窗口内最大请求数
-  interval_seconds: 60      # 限流时间窗口(秒)
+  limit: 300
+  interval_seconds: 60
+
+auth:
+  enabled: true
+  token: ""                 # 留空则读 AUTH_TOKEN 环境变量
+  session_secret: ""        # 留空则由 token 派生
+  session_ttl_hours: 12
 ```
+
+密钥优先级：`AUTH_TOKEN` 环境变量 > `auth.token`。启用鉴权但两者都为空时服务拒绝启动。
+
+## 接口
+
+| 接口 | 方法 | 说明 |
+|---|---|---|
+| `/healthz` | GET | 健康检查，免鉴权 |
+| `/upload` | POST | 上传，字段 `file`，参数 `username` |
+| `/download` | GET | 下载，参数 `username`、`filename` |
+| `/query` | GET | 查询，参数 `username`、`keyword` |
+| `/file` | DELETE | 删除，参数 `username`、`filename` |
+| `/login` `/logout` | GET/POST | 网页登录与退出 |
+| `/api/me` | GET | 当前登录用户 |
+
+鉴权方式三选一：请求头 `X-Token`、查询参数 `token`、网页会话 cookie。完整字段与错误码见 [API.md](API.md)。
+
+## 存储结构
+
+```
+data/
+├── alice/
+│   ├── build.log
+│   └── release-v1.tar.gz
+└── bob/
+    └── screenshot.png
+```
+
+一个用户一个目录，目录名即用户名。上传先写临时文件再原子改名，不会读到半截文件。
 
 ## 目录结构
 
 ```
-log-service/
-├── cmd/server/main.go       # 入口
-├── configs/config.yaml      # 配置文件
+LogService/
+├── cmd/server/main.go
+├── configs/config.yaml
 ├── internal/
-│   ├── api/                 # HTTP 处理器
-│   ├── config/              # 配置加载
-│   ├── middleware/           # 中间件(日志/限流/恢复)
-│   ├── model/               # 数据模型
-│   └── service/             # 业务逻辑(存储/清理/验证)
-├── data/                    # 日志文件存储(自动创建)
-├── logs/                    # 运行日志
-├── run.sh                   # 启动脚本
-└── e2e_test.py              # 端到端测试
+│   ├── api/          # HTTP 处理器与网页模板
+│   ├── config/       # 配置加载
+│   ├── middleware/   # 日志、限流、鉴权、会话、Panic 恢复
+│   ├── model/        # 数据模型
+│   └── service/      # 存储、校验、清理
+├── run.sh
+└── e2e_test.py
 ```
-
-## 存储结构
-
-文件按名称分组存储在子目录中：
-
-```
-data/
-├── myapp/
-│   ├── myapp_abc123_20240101120000.zip
-│   └── myapp_abc123_20240102120000.zip
-└── service/
-    └── service_commit789_20241231235959.zip
-```
-
-## 中间件
-
-- **日志** - 记录每个请求的方法、路径、状态码和耗时
-- **Panic 恢复** - 捕获 panic 并返回 500 错误
-- **限流** - 基于滑动窗口的请求限流
 
 ## 测试
 
 ```bash
 # 单元测试
-cd log-service && go test ./internal/...
+go test ./...
 
 # 端到端测试
-python3 e2e_test.py
+AUTH_TOKEN=<口令> BASE_URL=http://127.0.0.1:8080 python3 e2e_test.py
 ```
 
-## License
+## 已知限制
 
-Internal use only.
+- 网页「下载时自选保存位置」依赖浏览器的文件系统访问 API，只在 HTTPS 或 localhost 下生效。HTTP 部署时回退为浏览器默认下载目录，可在浏览器设置里勾选「下载前询问每个文件的保存位置」。
+- 8080 目前是明文 HTTP，口令在网络上可被嗅探。对公网长期使用建议前置 Caddy/Nginx 启用 HTTPS。

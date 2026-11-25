@@ -1,198 +1,190 @@
-# API 接口文档
+# 接口文档
 
-基础 URL: `http://localhost:8080`
+基础地址：`http://<host>:8080`
+
+## 鉴权
+
+所有接口（除 `/healthz`、`/login`）都需要鉴权，三种方式任选：
+
+| 方式 | 用法 |
+|---|---|
+| 请求头 | `X-Token: <口令>` |
+| 查询参数 | `?token=<口令>` |
+| 会话 cookie | 浏览器登录后由服务端下发，自动携带 |
+
+未通过鉴权返回 `401`：
+
+```json
+{"code":401,"message":"未登录或 token 无效，请在请求头带 X-Token"}
+```
+
+## 用户名规则
+
+- 1~64 字符，正则 `^[a-z0-9][a-z0-9._@+-]{0,63}$`
+- 统一转小写，不能含 `..`
+- 每个用户名对应一个存储目录 `data/{username}/`
 
 ---
 
 ## 1. 健康检查
 
 ```
-GET /
+GET /healthz
 ```
 
-**响应:**
+免鉴权。
 
 ```json
-{
-  "code": 0,
-  "message": "log service is running"
-}
+{"code":0,"message":"ok","data":{"status":"ok","time":"2026-01-01T12:00:00+08:00"}}
 ```
 
 ---
 
-## 2. 上传日志文件
+## 2. 上传文件
 
 ```
 POST /upload
 Content-Type: multipart/form-data
 ```
 
-**参数:**
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| file | file | 是 | zip 格式日志文件 |
-
-**请求示例:**
+| 参数 | 位置 | 必填 | 说明 |
+|---|---|---|---|
+| file | form | 是 | 任意格式文件 |
+| username | query 或 form | 是* | 目标用户名；登录态下可省略，取会话用户 |
 
 ```bash
-curl -X POST -F "file=@myapp_abc123_20240101120000.zip" http://localhost:8080/upload
+curl -H "X-Token: $TOKEN" -F "file=@release.tar.gz" \
+  "http://host:8080/upload?username=alice"
 ```
 
-**成功响应 (200):**
+成功：
 
 ```json
 {
   "code": 0,
   "message": "上传成功",
-  "data": "myapp_abc123_20240101120000.zip"
+  "data": {
+    "username": "alice",
+    "name": "release.tar.gz",
+    "size": 1048576,
+    "overwritten": false
+  }
 }
 ```
 
-**错误响应 (400):**
+`overwritten` 为 `true` 表示覆盖了同名文件。
 
-未上传文件或表单字段名不匹配时:
-
-```json
-{
-  "code": 400,
-  "message": "上传文件为空: request EOF"
-}
-```
-
-文件名不符合规范时:
-
-```json
-{
-  "code": 400,
-  "message": "文件名格式错误，正确格式: {名称}_{commit_id}_{datetime}.zip，datetime 为 14 位数字"
-}
-```
-
-**错误响应 (413):**
-
-上传文件超过 `max_size_mb` 限制时返回。
+| HTTP | 场景 |
+|---|---|
+| 400 | 缺 username、文件名非法、未带 file 字段 |
+| 413 | 超过 `max_size_mb` |
+| 500 | 写盘失败 |
 
 ---
 
-## 3. 下载日志文件
+## 3. 下载文件
 
 ```
-GET /download?filename={filename}
+GET /download?username=alice&filename=release.tar.gz
 ```
 
-**参数:**
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| filename | string | 是 | 文件名，需符合命名规范 |
-
-**请求示例:**
+username 在登录态下可省略。
 
 ```bash
-curl -O -J "http://localhost:8080/download?filename=myapp_abc123_20240101120000.zip"
+curl -H "X-Token: $TOKEN" -OJ \
+  "http://host:8080/download?username=alice&filename=release.tar.gz"
 ```
 
-**成功响应:**
+成功响应头：
 
-- 状态码: 200
-- Content-Type: `application/zip`
-- Content-Disposition: `attachment; filename="myapp_abc123_20240101120000.zip"`
-- 响应体: 文件二进制内容
+| 头 | 值 |
+|---|---|
+| Content-Type | 按扩展名推断，未知为 `application/octet-stream` |
+| Content-Length | 文件字节数 |
+| Content-Disposition | `attachment; filename="..."; filename*=UTF-8''...` |
 
-**错误响应 (400):**
-
-```json
-{
-  "code": 400,
-  "message": "缺少 filename 参数"
-}
-```
-
-```json
-{
-  "code": 400,
-  "message": "文件名格式错误，正确格式: {名称}_{commit_id}_{datetime}.zip，datetime 为 14 位数字"
-}
-```
-
-**错误响应 (404):**
-
-```json
-{
-  "code": 404,
-  "message": "文件不存在"
-}
-```
+| HTTP | 场景 |
+|---|---|
+| 400 | 缺 filename 或文件名含路径 |
+| 404 | 文件不存在或不属于该用户 |
 
 ---
 
-## 4. 查询日志文件
+## 4. 查询文件
 
 ```
-GET /query?name={name}&commit={commit}
+GET /query?username=alice&keyword=build
 ```
 
-**参数:**
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| username | 是* | 登录态下可省略 |
+| keyword | 否 | 文件名子串，不区分大小写 |
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| name | string | 否 | 日志名称前缀 |
-| commit | string | 否 | commit_id 前缀 |
-
-两个参数至少传一个。支持的组合:
-- `?name=myapp` - 按名称查询
-- `?commit=abc123` - 按 commit 查询
-- `?name=myapp&commit=abc123` - 同时按名称和 commit 查询
-
-**请求示例:**
+`name` 作为 `keyword` 的兼容别名保留。
 
 ```bash
-curl "http://localhost:8080/query?name=myapp&commit=abc123"
+curl -H "X-Token: $TOKEN" "http://host:8080/query?username=alice&keyword=log"
 ```
-
-**成功响应 (200):**
 
 ```json
 {
   "code": 0,
   "message": "查询成功",
   "data": {
+    "username": "alice",
+    "keyword": "log",
     "files": [
       {
-        "name": "myapp_abc123_20240101120000.zip",
-        "size": 102400,
-        "modified_time": "2024-01-01 12:00:00"
-      },
-      {
-        "name": "myapp_abc123_20240102120000.zip",
-        "size": 104857,
-        "modified_time": "2024-01-02 12:00:00"
+        "username": "alice",
+        "name": "build.log",
+        "size": 2048,
+        "modified_time": "2026-01-01T12:00:00+08:00"
       }
     ],
-    "count": 2
+    "count": 1
   }
 }
 ```
 
-**响应字段说明:**
+只返回该用户名目录下的文件，按修改时间倒序。
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| files | array | 文件列表 |
-| files[].name | string | 文件名 |
-| files[].size | int64 | 文件大小(字节) |
-| files[].modified_time | string | 最后修改时间 |
-| count | int | 匹配文件数量 |
+---
 
-**错误响应 (500):**
+## 5. 删除文件
+
+```
+DELETE /file?username=alice&filename=build.log
+```
+
+```bash
+curl -X DELETE -H "X-Token: $TOKEN" \
+  "http://host:8080/file?username=alice&filename=build.log"
+```
+
+| HTTP | 场景 |
+|---|---|
+| 200 | 删除成功 |
+| 400 | 缺 filename 或文件名非法 |
+| 404 | 文件不存在 |
+
+---
+
+## 6. 网页登录与退出
+
+```
+GET  /login
+POST /login   form: username, token, next
+GET|POST /logout
+GET  /api/me
+```
+
+登录成功返回 `302` 并下发 `fs_session` cookie（HttpOnly、SameSite=Lax、默认 12 小时）。`next` 只接受站内相对路径。
+
+`/api/me` 返回：
 
 ```json
-{
-  "code": 500,
-  "message": "查询失败: ..."
-}
+{"code":0,"message":"ok","data":{"username":"alice"}}
 ```
 
 ---
@@ -200,45 +192,25 @@ curl "http://localhost:8080/query?name=myapp&commit=abc123"
 ## 通用响应格式
 
 ```json
-{
-  "code": 0,
-  "message": "状态描述",
-  "data": null
-}
+{"code": 0, "message": "状态描述", "data": null}
 ```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| code | int | 0=成功，非0=错误 |
-| message | string | 状态描述 |
-| data | any | 可选，响应数据 |
 
 ## 错误码
 
-| HTTP 状态码 | code | 说明 |
-|-------------|------|------|
+| HTTP | code | 说明 |
+|---|---|---|
 | 200 | 0 | 成功 |
-| 400 | 400 | 参数错误/文件名不合法 |
+| 400 | 400 | 参数错误或名称非法 |
+| 401 | 401 | 未登录或口令错误 |
 | 404 | 404 | 文件不存在 |
-| 405 | 405 | HTTP 方法不允许 |
+| 405 | 405 | 方法不允许 |
 | 413 | 413 | 文件过大 |
-| 429 | 429 | 请求过于频繁(限流) |
+| 429 | 429 | 请求过于频繁 |
 | 500 | 500 | 服务内部错误 |
 
-## 文件名验证规则
+## 文件名规则
 
-正则: `^[a-zA-Z0-9\-]+_[a-zA-Z0-9\-]+_\d{14}\.zip$`
-
-- 名称部分: 仅字母、数字、连字符
-- commit_id 部分: 仅字母、数字、连字符
-- datetime 部分: 14 位数字 (YYYYMMDDhhmmss)
-- 扩展名: `.zip`
-
-合法示例:
-- `myapp-abc123_20240101120000.zip`
-- `service-v1_commit-789_20241231235959.zip`
-
-非法示例:
-- `my app_abc123_20240101120000.zip` (名称含空格)
-- `myapp_abc123_20240101.zip` (datetime 不足14位)
-- `myapp_abc123_20240101120000.txt` (非 .zip 扩展名)
+- 取客户端文件名的最后一段，剥离路径
+- 禁止 `/`、`\`、控制字符，不能是 `.` 或 `..`
+- 最长 255 字节，UTF-8
+- 扩展名不限
